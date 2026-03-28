@@ -1,29 +1,69 @@
 # DSTT — Dynamic Semi-Trained Topology
 
-A C++17 framework for deterministic, contextually adaptive multimedia generation with a full training pipeline.
+A C++17 framework for deterministic, contextually adaptive multimedia generation with a full training pipeline. After training, DSTT generates **text**, **images**, and **video** from natural language prompts.
 
 ## Overview
 
-DSTT is a trainable system for multi-modal content generation (text, image, video). Like large language models, DSTT has a distinct **training phase** where it learns from data before inference. Unlike LLMs, DSTT does not use attention or transformers — it combines a BPE tokenizer, learnable weight matrices, and an evolutionary algorithm to produce contextually adaptive parameter configurations.
+DSTT is a trainable system for multi-modal content generation. Like large language models, DSTT has a distinct **training phase** where it learns from data before inference. Unlike LLMs, DSTT does not use attention or transformers — it combines a BPE tokenizer, learnable weight matrices, and an evolutionary algorithm to produce contextually adaptive parameter configurations that drive content synthesis across three modalities.
+
+### What DSTT Generates
+
+Given a trained `.dstt` model and a text prompt, DSTT produces:
+
+| Modality | Output | How |
+|----------|--------|-----|
+| **Text** | Generated text sampled from the learned BPE vocabulary | Token embeddings scored against evolved parameter distributions via cosine similarity, then temperature-sampled |
+| **Image** | 64x64 RGB images saved as PPM files | Evolved parameters mapped to pixel values through sigmoid activation with spatial phase modulation |
+| **Video** | Temporally coherent frame sequences saved as PPM series | Image generation extended with time-varying parameter modulation and inter-frame blending |
+
+A **branch predictor** selects which modality to generate at each step based on the prompt context. The model cycles through text, image, and video generation, producing multi-modal output from a single prompt.
 
 ### How It Works
 
 DSTT operates in three phases:
 
 ```
-Phase 1: Training          Phase 2: Parameter Evolution     Phase 3: Generation
-─────────────────          ──────────────────────────       ────────────────────
-Corpus → Tokenizer         Prompt → Tokenizer → FDMP       Branch Predictor
-       → BPE vocab                → ARM (CFM/AFM)                → ARM evaluate
-       → FDMP weight update       → EA evolve                    → Synthesise
-       → Embedding update         → Best parameters              → Multi-modal output
+Phase 1: Training          Phase 2: Parameter Evolution     Phase 3: Content Generation
+─────────────────          ──────────────────────────       ───────────────────────────
+Corpus → Tokenizer         Prompt → Tokenizer → FDMP       Branch Predictor → modality
+       → BPE vocab                → ARM (CFM/AFM)          ARM evaluate → sample params
+       → FDMP weight update       → EA evolve              ContentGenerator → text/image/video
+       → Embedding update         → Best parameters        Synthesise → multi-modal output
 ```
 
 **Phase 1 — Training.** A BPE tokenizer builds a sub-word vocabulary from the training corpus. Each training example is tokenized, embedded via learned token embeddings, passed through the FDMP to generate parameters, and evolved by the EA. The resulting fitness signal drives gradient updates to both the FDMP weight matrices and the token embedding table. This is analogous to pre-training in LLMs: the system learns input-to-parameter mappings so that inference starts from a better initialization.
 
 **Phase 2 — Parameter Evolution.** At inference, the input prompt is tokenized and embedded. The FDMP generates raw parameters using its trained weights. The EA then evolves these parameters per modality using CFM (Correct Flow Matrix) and AFM (Adversarial Flow Matrix) scoring. Because the FDMP was trained, fewer EA generations are needed to reach high fitness.
 
-**Phase 3 — Multi-Modal Generation.** A branch predictor selects which modality to generate next. The ARM evaluates optimized parameters, samples one, and the synthesizer appends the output element with cross-modal consistency checks. Context is updated after each step.
+**Phase 3 — Content Generation.** A branch predictor selects which modality (text, image, or video) to generate at each step. The ARM evaluates optimized parameters and samples from the distribution. The **ContentGenerator** then transforms those parameters into actual content:
+- **Text:** Computes similarity between each vocabulary token's learned embedding and the evolved parameter embedding, applies temperature-controlled softmax, and samples tokens — the same fundamental approach LLMs use, but driven by evolutionary optimization instead of transformer attention.
+- **Image:** Maps evolved parameters to RGB pixel values via `sigmoid(θ[i] · context[j] + spatial_phase)`, producing coherent color gradients modulated by the prompt context.
+- **Video:** Extends image generation with temporal parameter modulation `θ_t[j] = θ[j] · (1 + 0.3·sin(2πt + phase))` and inter-frame blending for smooth motion.
+
+## Quick Start
+
+```bash
+# Build
+mkdir build && cd build
+cmake .. -DCMAKE_BUILD_TYPE=Release
+make -j$(nproc)
+
+# Train a model from example data
+./dstt_cli
+dstt> /train ../training_data/example.jsonl ../models/my_model.dstt
+
+# Generate content from a prompt
+dstt> A sunset over snow-capped mountains
+  [0] Text -> "mountain sunset..."
+  [1] Image -> 64x64 image
+  [2] Video -> video frame
+  ...
+
+# Save generated images and video to disk
+dstt> /save_images
+dstt> /save_video
+dstt> A cinematic landscape at golden hour
+```
 
 ## Model Files (.dstt)
 
@@ -53,14 +93,26 @@ dstt::DSTTModel model;
 model.load("models/my_model.dstt");
 std::cout << model.info() << "\n";
 
-// Generate output from a prompt
-auto output = model.generate("A sunset over mountains", 12,
-    [](size_t step, const dstt::OutputElement& elem) {
-        std::cout << step << ": " << dstt::modality_name(elem.modality) << "\n";
+// Generate multi-modal content from a prompt
+auto result = model.run("A sunset over mountains", 12,
+    [](size_t step, const dstt::GeneratedContent& c) {
+        std::cout << step << ": " << dstt::modality_name(c.modality);
+        if (c.modality == dstt::Modality::Text)
+            std::cout << " -> \"" << c.text << "\"";
+        std::cout << "\n";
     });
+
+// Access the generated content
+std::cout << "Generated text: " << result.generated_text << "\n";
+std::cout << "Images: " << result.images.size() << "\n";
+std::cout << "Video frames: " << result.video.frames.size() << "\n";
+
+// Save images and video to disk
+result.images[0].save_ppm("output.ppm");
+result.video.save_frames("output_video");
 ```
 
-#### Interactive CLI
+### Interactive CLI
 
 ```bash
 ./dstt_cli models/my_model.dstt
@@ -68,22 +120,23 @@ auto output = model.generate("A sunset over mountains", 12,
 
 ```
 dstt> A sunset over snowy peaks
-  [0] Image  prob=0.0329
-  [1] Video  prob=0.0358
-  ...
+Generating...
+  [0] Text -> "mountain peaks golden..."
+  [1] Image -> 64x64 image
+  [2] Video -> video frame
+  [3] Text -> "light fading..."
 
-dstt> /info
-DSTT Model
-  Format:          .dstt v1
-  Embed dim:       32
-  Param dim:       32
-  Vocabulary:      404 tokens
+========================================================================
+  Generation Result for: "A sunset over snowy peaks"
+========================================================================
 
-dstt> /train training_data/example.jsonl models/new_model.dstt
-Loaded 24 training examples
-Training...
-  Epoch 0  fitness=0.9995  loss=0.0005
-Model saved to models/new_model.dstt and loaded.
+  [Text Output] (4 steps)
+  mountain peaks golden...light fading...
+
+  [Image Output] 4 image(s) generated (64x64 RGB)
+  [Video Output] 4 frame(s) at 8 fps (64x64 RGB)
+
+  Summary: Text=4  Image=4  Video=4
 ```
 
 CLI commands:
@@ -93,6 +146,8 @@ CLI commands:
 | `/load <path.dstt>` | Load a trained model |
 | `/info` | Show model metadata |
 | `/steps <n>` | Set generation steps |
+| `/save_images` | Toggle saving generated images as PPM files |
+| `/save_video` | Toggle saving video frames as PPM files |
 | `/train <data> <out>` | Train from data file, save as .dstt |
 | `/help` | Show help |
 | `/quit` | Exit |
@@ -133,6 +188,30 @@ model.train_and_save(examples, "models/my_model.dstt",
 ```
 
 ## Architecture
+
+### Content Generation Pipeline
+
+After training, the generation pipeline transforms evolved parameters into content:
+
+```
+Prompt ──→ Tokenizer ──→ FDMP ──→ EA ──→ ARM ──→ Branch Predictor
+                                                        │
+                         ┌──────────────────────────────┤
+                         ▼              ▼               ▼
+                   ContentGenerator  ContentGenerator  ContentGenerator
+                     (Text)           (Image)           (Video)
+                         │              │               │
+                         ▼              ▼               ▼
+                   Token sampling   Pixel synthesis   Frame sequence
+                   from vocabulary  via sigmoid map   with temporal
+                   embeddings       of parameters     modulation
+```
+
+**Text generation:** For each vocabulary token, compute `score(t) = 0.6·cos(E[t], P) + 0.4·cos(E[t], C)` where `E[t]` is the learned token embedding, `P` is the parameter embedding, and `C` is the context. Apply temperature-scaled softmax and sample. Repetition is reduced by decaying sampled token probabilities.
+
+**Image generation:** For each pixel `(x, y)`, spatially hash into the parameter vector to get `θ[i], θ[j], θ[k]`, then compute RGB via `sigmoid(θ · context + spatial_phase)`. Spatial phase is modulated by `sin(2πu)` and `cos(2πv)` for coherent gradients.
+
+**Video generation:** Temporally modulate parameters: `θ_t[j] = θ[j] · (1 + 0.3·sin(2πt + j·π/dim))`. Each frame is generated like an image using the modulated parameters, then blended with the previous frame: `pixel = 0.7·current + 0.3·previous`.
 
 ### Tokenizer (BPE)
 
@@ -189,7 +268,8 @@ F = w_c * Coherence + w_r * Relevance + w_d * Diversity
 | **EA** | Evolves parameter configurations across generations |
 | **MGE** | Orchestrates generation: branch prediction + synthesis + consistency |
 | **Trainer** | Training loop: tokenizer building, FDMP weight updates, embedding updates |
-| **DSTTModel** | .dstt file I/O, model loading, inference interface, training data loaders |
+| **ContentGenerator** | Transforms evolved parameters into text tokens, image pixels, and video frames |
+| **DSTTModel** | .dstt file I/O, model loading, inference, training data loaders |
 
 ## Training
 
@@ -244,7 +324,7 @@ loaded.load("models/my_model");
 | **Tokenizer** | Builds BPE vocabulary | Uses learned vocabulary |
 | **FDMP weights** | Updated each step | Frozen |
 | **EA** | Short runs (signal for weight updates) | Full runs (parameter optimization) |
-| **Output** | Trained weight files | Multi-modal content |
+| **Output** | Trained .dstt model file | Generated text, images, and video |
 
 ## Building
 
@@ -290,6 +370,8 @@ The demo runs all three phases: trains on a small corpus, then generates multi-m
 ./dstt_cli models/my_model.dstt
 ```
 
+The CLI is the primary way to interact with trained DSTT models. Type any text prompt and the model generates a mix of text, images, and video — the branch predictor automatically selects the appropriate modality at each generation step based on the prompt context.
+
 ## Project Structure
 
 ```
@@ -300,7 +382,7 @@ dstt-full/
 ├── models/                    # Trained .dstt model files go here
 │   └── .gitkeep
 ├── training_data/             # Training data files (JSONL, CSV, TXT)
-│   ├── example.jsonl          # Example JSONL training data
+│   ├── example.jsonl          # Example JSONL training data (24 examples)
 │   ├── example.csv            # Example CSV training data
 │   ├── example.txt            # Example plain text training data
 │   └── README.md              # Training data format documentation
@@ -327,7 +409,8 @@ dstt-full/
 │   │   └── synthesiser.hpp    # Output synthesis
 │   ├── model/
 │   │   ├── dstt_format.hpp    # .dstt binary file format specification
-│   │   └── dstt_model.hpp     # Model loading, saving, and inference API
+│   │   ├── dstt_model.hpp     # Model loading, saving, and inference API
+│   │   └── content_generator.hpp  # Text/image/video content synthesis
 │   ├── training/
 │   │   └── trainer.hpp        # Training loop + save/load
 │   └── utils/
@@ -339,7 +422,7 @@ dstt-full/
 │   ├── ea/          # Chromosome, operators, fitness, population
 │   ├── fdmp/        # FDMP, tokenizer, embeddings
 │   ├── mge/         # MGE, branch predictor, synthesiser
-│   ├── model/       # DSTTModel (.dstt file I/O + inference)
+│   ├── model/       # DSTTModel, ContentGenerator (.dstt I/O + content synthesis)
 │   ├── training/    # Trainer
 │   └── utils/       # Math, RNG
 ├── tests/

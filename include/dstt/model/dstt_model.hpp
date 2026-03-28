@@ -2,6 +2,7 @@
 
 #include <dstt/core/types.hpp>
 #include <dstt/model/dstt_format.hpp>
+#include <dstt/model/content_generator.hpp>
 #include <dstt/fdmp/fdmp.hpp>
 #include <dstt/fdmp/tokenizer.hpp>
 #include <dstt/core/arm.hpp>
@@ -16,7 +17,8 @@
 namespace dstt {
 
 /// Callback for streaming generation output per step.
-using StepCallback = std::function<void(size_t step, const OutputElement& elem)>;
+using ContentStepCallback = std::function<void(size_t step,
+                                               const GeneratedContent& content)>;
 
 /// DSTTModel — load and interact with trained .dstt model files.
 ///
@@ -24,15 +26,20 @@ using StepCallback = std::function<void(size_t step, const OutputElement& elem)>
 /// a .gguf file in llama.cpp.  A .dstt file packages the full trained
 /// state (vocabulary, embeddings, FDMP weights) into a single file.
 ///
+/// After training, the model generates actual content:
+///   - **Text**: Samples tokens from the learned vocabulary using
+///     evolved parameter distributions and trained embeddings.
+///   - **Image**: Maps evolved parameters to RGB pixel data, producing
+///     64x64 PPM images influenced by the prompt context.
+///   - **Video**: Generates temporally coherent frame sequences by
+///     modulating parameters over time.
+///
 /// Usage:
 ///   DSTTModel model;
 ///   model.load("models/my_model.dstt");
-///   auto output = model.generate("A sunset over mountains");
-///
-///   // Or interactive:
-///   model.generate("prompt", 12, [](size_t step, const OutputElement& e) {
-///       std::cout << step << ": " << modality_name(e.modality) << "\n";
-///   });
+///   auto result = model.run("A sunset over mountains");
+///   std::cout << result.generated_text << "\n";
+///   result.images[0].save_ppm("output.ppm");
 class DSTTModel {
 public:
     DSTTModel();
@@ -50,14 +57,20 @@ public:
                         const std::string& output_path,
                         EpochCallback on_epoch = nullptr);
 
-    /// Generate multi-modal output from a text prompt.
-    /// @param prompt  Input text prompt.
-    /// @param steps   Number of output elements to generate.
-    /// @param on_step Optional per-step callback for streaming output.
-    /// @return The full synthesised output.
-    SynthesisedOutput generate(const std::string& prompt,
-                               size_t steps = 12,
-                               StepCallback on_step = nullptr);
+    /// Generate multi-modal content from a text prompt.
+    /// Produces text, images, and/or video depending on what the
+    /// branch predictor selects for each step.
+    /// @param prompt   Input text prompt.
+    /// @param steps    Number of generation steps.
+    /// @param on_step  Optional per-step callback with generated content.
+    /// @return Full generation result with text, images, and video.
+    GenerationResult run(const std::string& prompt,
+                         size_t steps = 12,
+                         ContentStepCallback on_step = nullptr);
+
+    /// Generate raw parameter output (low-level, without content synthesis).
+    SynthesisedOutput generate_raw(const std::string& prompt,
+                                   size_t steps = 12);
 
     /// Get model metadata as a human-readable string.
     std::string info() const;
@@ -69,15 +82,12 @@ public:
     const Config& config() const { return cfg_; }
 
     /// Load training data from a JSONL file.
-    /// Format: {"input": "text", "modality": "Text|Image|Video"}
     static std::vector<TrainingExample> load_training_jsonl(const std::string& path);
 
     /// Load training data from a plain text file (one example per line).
-    /// All examples default to Text modality.
     static std::vector<TrainingExample> load_training_txt(const std::string& path);
 
     /// Load training data from a CSV file.
-    /// Format: input,modality
     static std::vector<TrainingExample> load_training_csv(const std::string& path);
 
 private:

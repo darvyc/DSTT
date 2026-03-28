@@ -175,20 +175,24 @@ void DSTTModel::train_and_save(const std::vector<TrainingExample>& examples,
     save(output_path);
 }
 
-// ── Generation ──────────────────────────────────────────────────────
+// ── Content Generation ──────────────────────────────────────────────
 
-SynthesisedOutput DSTTModel::generate(const std::string& prompt,
-                                       size_t steps,
-                                       StepCallback on_step) {
+GenerationResult DSTTModel::run(const std::string& prompt,
+                                 size_t steps,
+                                 ContentStepCallback on_step) {
     if (!loaded_) {
         throw std::runtime_error("No model loaded. Call load() or train_and_save() first.");
     }
 
+    GenerationResult result;
+    result.prompt = prompt;
+
     ARM arm(cfg_);
     BranchPredictor bp(cfg_);
     Synthesiser synth(cfg_);
+    ContentGenerator cgen(cfg_);
 
-    // Phase 1: Encode and evolve parameters per modality
+    // ── Evolve parameters per modality ──
     struct ModalityState {
         Vec context;
         Vec theta_optimised;
@@ -199,16 +203,12 @@ SynthesisedOutput DSTTModel::generate(const std::string& prompt,
 
     for (size_t mi = 0; mi < MODALITY_COUNT; ++mi) {
         Modality m = static_cast<Modality>(mi);
-
-        // Tokenize and embed using trained tokenizer
         std::vector<uint32_t> tokens = tokenizer_.encode(prompt);
         Vec context = tokenizer_.embed_tokens(tokens);
         states[mi].context = context;
 
-        // Generate raw params from trained FDMP
         Vec raw_theta = fdmp_.generate_params(context, m);
 
-        // Evolve
         Config ea_cfg = cfg_;
         ea_cfg.max_generations = std::min(cfg_.max_generations, size_t(50));
         ea_cfg.population_size = std::min(cfg_.population_size, size_t(30));
@@ -218,9 +218,12 @@ SynthesisedOutput DSTTModel::generate(const std::string& prompt,
         states[mi].theta_optimised = best.decode();
     }
 
-    // Phase 2: Generate output with branch prediction
+    // ── Generate content step by step ──
     Vec current_context = states[0].context;
     Vec prev_state = init_prev;
+    Vec prev_video_frame;
+    size_t video_frame_idx = 0;
+    double total_prob = 0.0;
 
     for (size_t step = 0; step < steps; ++step) {
         auto [predicted_m, confidence] = bp.predict(current_context);
@@ -240,32 +243,78 @@ SynthesisedOutput DSTTModel::generate(const std::string& prompt,
             param_embed[d] = theta_val * current_context[d % current_context.size()];
         }
 
-        OutputElement elem{predicted_m, std::move(param_embed),
+        OutputElement elem{predicted_m, param_embed,
                           r.sampled_idx, r.probabilities[r.sampled_idx]};
-
         synth.append(elem);
 
         if (!synth.check_consistency()) {
-            Modality fallback = bp.least_recent();
-            size_t fi = static_cast<size_t>(fallback);
-            ARMResult fr = arm.evaluate(states[fi].theta_optimised,
-                                        current_context, prev_state, fallback);
+            predicted_m = bp.least_recent();
+            mi = static_cast<size_t>(predicted_m);
+            ARMResult fr = arm.evaluate(states[mi].theta_optimised,
+                                        current_context, prev_state, predicted_m);
             Vec fb_embed(edim);
-            double fb_val = states[fi].theta_optimised[fr.sampled_idx];
+            double fb_val = states[mi].theta_optimised[fr.sampled_idx];
             for (size_t d = 0; d < edim; ++d) {
                 fb_embed[d] = fb_val * current_context[d % current_context.size()];
             }
             synth.output().elements.back() = OutputElement{
-                fallback, std::move(fb_embed),
+                predicted_m, fb_embed,
                 fr.sampled_idx, fr.probabilities[fr.sampled_idx]};
+
+            // Update ARM result for content generation
+            r = std::move(fr);
+            param_embed = std::move(fb_embed);
         }
 
         const auto& last = synth.output().elements.back();
+        total_prob += last.probability;
 
-        if (on_step) {
-            on_step(step, last);
+        // ── Synthesise actual content based on modality ──
+        GeneratedContent content;
+        content.modality = last.modality;
+
+        switch (last.modality) {
+            case Modality::Text: {
+                content.text = cgen.generate_text(
+                    r.probabilities, states[mi].theta_optimised,
+                    current_context, tokenizer_, 4, 0.8);
+                result.generated_text += content.text;
+                result.text_steps++;
+                break;
+            }
+            case Modality::Image: {
+                content.image = cgen.generate_image(
+                    states[mi].theta_optimised, current_context, 64, 64);
+                result.images.push_back(content.image);
+                result.image_steps++;
+                break;
+            }
+            case Modality::Video: {
+                Vec frame = cgen.generate_video_frame(
+                    states[mi].theta_optimised, current_context,
+                    prev_video_frame, video_frame_idx, 64, 64);
+                prev_video_frame = frame;
+                video_frame_idx++;
+
+                if (result.video.width == 0) {
+                    result.video.width = 64;
+                    result.video.height = 64;
+                    result.video.channels = 3;
+                    result.video.fps = 8.0;
+                }
+                result.video.frames.push_back(std::move(frame));
+                result.video_steps++;
+                break;
+            }
         }
 
+        result.steps.push_back(std::move(content));
+
+        if (on_step) {
+            on_step(step, result.steps.back());
+        }
+
+        // ── Update context ──
         prev_state = current_context;
         if (last.embedding.size() == current_context.size()) {
             for (size_t d = 0; d < current_context.size(); ++d) {
@@ -273,6 +322,70 @@ SynthesisedOutput DSTTModel::generate(const std::string& prompt,
                                    + 0.2 * last.embedding[d];
             }
         }
+
+        bp.update(current_context, last.modality);
+        bp.record_generation(last.modality);
+    }
+
+    result.avg_probability = (steps > 0) ? total_prob / static_cast<double>(steps) : 0.0;
+    return result;
+}
+
+// ── Raw generation (without content synthesis) ──────────────────────
+
+SynthesisedOutput DSTTModel::generate_raw(const std::string& prompt,
+                                           size_t steps) {
+    if (!loaded_) {
+        throw std::runtime_error("No model loaded.");
+    }
+
+    ARM arm(cfg_);
+    BranchPredictor bp(cfg_);
+    Synthesiser synth(cfg_);
+
+    struct ModalityState { Vec context; Vec theta_optimised; };
+    std::array<ModalityState, MODALITY_COUNT> states;
+    Vec init_prev(cfg_.embed_dim, 0.0);
+
+    for (size_t mi = 0; mi < MODALITY_COUNT; ++mi) {
+        Modality m = static_cast<Modality>(mi);
+        std::vector<uint32_t> tokens = tokenizer_.encode(prompt);
+        Vec context = tokenizer_.embed_tokens(tokens);
+        states[mi].context = context;
+        Config ea_cfg = cfg_;
+        ea_cfg.max_generations = std::min(cfg_.max_generations, size_t(50));
+        ea_cfg.population_size = std::min(cfg_.population_size, size_t(30));
+        Population pop(ea_cfg);
+        Chromosome best = pop.evolve(context, init_prev, m);
+        states[mi].theta_optimised = best.decode();
+    }
+
+    Vec current_context = states[0].context;
+    Vec prev_state = init_prev;
+
+    for (size_t step = 0; step < steps; ++step) {
+        auto [predicted_m, confidence] = bp.predict(current_context);
+        if (confidence < cfg_.bp_confidence_threshold)
+            predicted_m = bp.least_recent();
+
+        size_t mi = static_cast<size_t>(predicted_m);
+        const Vec& theta = states[mi].theta_optimised;
+        ARMResult r = arm.evaluate(theta, current_context, prev_state, predicted_m);
+
+        size_t edim = std::min(cfg_.embed_dim, current_context.size());
+        Vec pe(edim);
+        double tv = theta[r.sampled_idx];
+        for (size_t d = 0; d < edim; ++d)
+            pe[d] = tv * current_context[d % current_context.size()];
+
+        synth.append({predicted_m, std::move(pe),
+                     r.sampled_idx, r.probabilities[r.sampled_idx]});
+
+        const auto& last = synth.output().elements.back();
+        prev_state = current_context;
+        if (last.embedding.size() == current_context.size())
+            for (size_t d = 0; d < current_context.size(); ++d)
+                current_context[d] = 0.8 * current_context[d] + 0.2 * last.embedding[d];
 
         bp.update(current_context, last.modality);
         bp.record_generation(last.modality);
@@ -319,7 +432,6 @@ std::vector<TrainingExample> DSTTModel::load_training_jsonl(const std::string& p
     while (std::getline(f, line)) {
         if (line.empty() || line[0] == '#') continue;
 
-        // Minimal JSON parsing for {"input": "...", "modality": "..."}
         auto extract = [&](const std::string& key) -> std::string {
             std::string needle = "\"" + key + "\"";
             size_t pos = line.find(needle);
@@ -364,7 +476,7 @@ std::vector<TrainingExample> DSTTModel::load_training_csv(const std::string& pat
     bool header = true;
     while (std::getline(f, line)) {
         if (line.empty() || line[0] == '#') continue;
-        if (header) { header = false; continue; }  // Skip CSV header row
+        if (header) { header = false; continue; }
 
         size_t comma = line.rfind(',');
         if (comma == std::string::npos) {
@@ -372,7 +484,6 @@ std::vector<TrainingExample> DSTTModel::load_training_csv(const std::string& pat
         } else {
             std::string input = line.substr(0, comma);
             std::string mod   = line.substr(comma + 1);
-            // Trim whitespace
             while (!mod.empty() && mod.front() == ' ') mod.erase(mod.begin());
             while (!mod.empty() && mod.back() == ' ') mod.pop_back();
             examples.push_back({input, parse_modality(mod)});
