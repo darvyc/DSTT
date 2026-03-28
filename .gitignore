@@ -1,1 +1,5 @@
 build/
+
+# Trained model files (can be large)
+*.dstt
+models/*.bin
