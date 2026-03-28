@@ -1,4 +1,5 @@
 #include <dstt/mge/mge.hpp>
+#include <dstt/training/trainer.hpp>
 #include <dstt/utils/random.hpp>
 #include <dstt/utils/timer.hpp>
 #include <iostream>
@@ -19,7 +20,7 @@ static void run_demo(const std::string& prompt, const Config& cfg) {
 
     MGE mge(cfg);
 
-    std::cout << "\n[Phase 1] Evolving parameters per modality...\n";
+    std::cout << "\n[Phase 2] Evolving parameters per modality...\n";
 
     size_t total_gens = 0;
     double final_best = 0.0;
@@ -40,7 +41,7 @@ static void run_demo(const std::string& prompt, const Config& cfg) {
             });
     }
 
-    std::cout << "\n[Phase 2] Generating multi-modal output (" 
+    std::cout << "\n[Phase 3] Generating multi-modal output ("
               << output.elements.size() << " elements)\n\n";
 
     print_separator();
@@ -97,7 +98,7 @@ Dynamic Semi-Trained Topology v2.0
 
     RNG::seed(42);
 
-    // Configuration
+    // ── Configuration ───────────────────────────────────────────────
     Config cfg;
     cfg.param_dim       = 32;
     cfg.embed_dim       = 32;
@@ -111,7 +112,48 @@ Dynamic Semi-Trained Topology v2.0
     cfg.coherence_threshold = 0.25;
     cfg.bp_confidence_threshold = 0.6;
 
-    // Run demos with different prompts
+    // Training config
+    cfg.training_epochs = 3;
+    cfg.training_lr     = 0.005;
+    cfg.vocab_size      = 512;
+
+    // ── Phase 1: Training ───────────────────────────────────────────
+    print_separator();
+    std::cout << "  [Phase 1] Training FDMP weights on example corpus\n";
+    print_separator();
+
+    std::vector<TrainingExample> training_data = {
+        {"A sunset over snow-capped mountains",           Modality::Image},
+        {"Breaking news: earthquake hits coastal city",   Modality::Text},
+        {"Time-lapse of a flower blooming in spring",     Modality::Video},
+        {"Portrait photography with natural lighting",    Modality::Image},
+        {"Scientific paper on quantum entanglement",      Modality::Text},
+        {"Drone footage of ocean waves crashing",         Modality::Video},
+        {"Abstract oil painting with vivid colors",       Modality::Image},
+        {"A short story about a wandering knight",        Modality::Text},
+        {"Slow-motion capture of a hummingbird",          Modality::Video},
+        {"Architectural photograph of a modern building", Modality::Image},
+        {"Technical documentation for an API",            Modality::Text},
+        {"Cinematic trailer for a fantasy film",          Modality::Video},
+    };
+
+    Trainer trainer(cfg);
+    {
+        ScopedTimer timer("Training phase");
+        trainer.train(training_data, [](const EpochStats& stats) {
+            std::cout << "  Epoch " << std::setw(2) << stats.epoch
+                      << "  avg_fitness=" << std::fixed << std::setprecision(6)
+                      << stats.avg_fitness
+                      << "  avg_loss=" << stats.avg_loss
+                      << "  best=" << stats.best_fitness << "\n";
+        });
+    }
+
+    std::cout << "\n  Tokenizer vocabulary: "
+              << trainer.tokenizer().actual_vocab_size() << " tokens\n";
+    std::cout << "  Training complete.\n\n";
+
+    // ── Phase 2 & 3: Inference ──────────────────────────────────────
     run_demo("A sunset over snow-capped mountains", cfg);
     run_demo("Neural network training convergence analysis", cfg);
     run_demo("An orchestra performing Beethoven's Fifth Symphony", cfg);

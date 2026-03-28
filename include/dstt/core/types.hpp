@@ -56,6 +56,13 @@ struct Config {
     // Parameter dimension (m) — set by the user
     size_t param_dim = 64;
 
+    // ── Training phase ──────────────────────────────────────────────
+    size_t training_epochs     = 10;
+    double training_lr         = 0.005;    // FDMP weight learning rate
+    size_t vocab_size          = 4096;     // Tokenizer vocabulary size
+    size_t min_token_freq      = 2;        // BPE minimum pair frequency
+    double weight_decay        = 1e-4;     // L2 regularisation
+
     /// Effective mutation rate (auto if zero).
     double effective_mutation_rate() const {
         return (mutation_rate > 0.0) ? mutation_rate : 1.0 / static_cast<double>(param_dim);
