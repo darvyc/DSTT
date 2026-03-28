@@ -37,6 +37,7 @@ set(DSTT_SOURCES
     src/mge/mge.cpp
     src/training/trainer.cpp
     src/model/dstt_model.cpp
+    src/model/content_generator.cpp
 )
 
 add_library(dstt_lib ${DSTT_SOURCES})

@@ -70,15 +70,14 @@ Modality BranchPredictor::least_recent() const {
     size_t oldest = last_gen_[0];
     for (size_t m = 1; m < MODALITY_COUNT; ++m) {
         // SIZE_MAX means never generated — always prefer that
-        if (last_gen_[m] == SIZE_MAX) {
+        if (last_gen_[m] == SIZE_MAX && oldest != SIZE_MAX) {
             return static_cast<Modality>(m);
         }
-        if (last_gen_[m] < oldest || oldest == SIZE_MAX) {
+        if (last_gen_[m] < oldest) {
             oldest = last_gen_[m];
             best = m;
         }
     }
-    // If best is still SIZE_MAX (never generated), return it
     return static_cast<Modality>(best);
 }
 
