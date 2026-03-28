@@ -36,6 +36,7 @@ set(DSTT_SOURCES
     src/mge/synthesiser.cpp
     src/mge/mge.cpp
     src/training/trainer.cpp
+    src/model/dstt_model.cpp
 )
 
 add_library(dstt_lib ${DSTT_SOURCES})
@@ -44,6 +45,10 @@ target_include_directories(dstt_lib PUBLIC include)
 # ── Demo executable ──────────────────────────────────────────────────
 add_executable(dstt_demo examples/demo.cpp)
 target_link_libraries(dstt_demo PRIVATE dstt_lib)
+
+# ── Interactive CLI ──────────────────────────────────────────────────
+add_executable(dstt_cli examples/dstt_cli.cpp)
+target_link_libraries(dstt_cli PRIVATE dstt_lib)
 
 # ── Tests ────────────────────────────────────────────────────────────
 enable_testing()

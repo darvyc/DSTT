@@ -25,6 +25,113 @@ Corpus → Tokenizer         Prompt → Tokenizer → FDMP       Branch Predicto
 
 **Phase 3 — Multi-Modal Generation.** A branch predictor selects which modality to generate next. The ARM evaluates optimized parameters, samples one, and the synthesizer appends the output element with cross-modal consistency checks. Context is updated after each step.
 
+## Model Files (.dstt)
+
+Trained DSTT models are saved as `.dstt` files — self-contained binary files that package all learned weights, vocabulary, and configuration into a single file. This is analogous to how `.gguf` files work for LLMs in llama.cpp.
+
+### .dstt File Format
+
+A `.dstt` file contains:
+
+| Section | Contents |
+|---------|----------|
+| **Header** | Magic bytes (`DSTT`), version, dimensions |
+| **Config** | All hyperparameters used during training |
+| **Vocabulary** | BPE token table (token strings + IDs) |
+| **Embeddings** | Token embedding matrix (vocab x embed_dim) |
+| **FDMP Weights** | Per-modality W matrices and bias vectors |
+
+### Interacting with .dstt Models
+
+Load and interact with trained models using `DSTTModel` or the interactive CLI:
+
+```cpp
+#include <dstt/model/dstt_model.hpp>
+
+// Load a trained model
+dstt::DSTTModel model;
+model.load("models/my_model.dstt");
+std::cout << model.info() << "\n";
+
+// Generate output from a prompt
+auto output = model.generate("A sunset over mountains", 12,
+    [](size_t step, const dstt::OutputElement& elem) {
+        std::cout << step << ": " << dstt::modality_name(elem.modality) << "\n";
+    });
+```
+
+#### Interactive CLI
+
+```bash
+./dstt_cli models/my_model.dstt
+```
+
+```
+dstt> A sunset over snowy peaks
+  [0] Image  prob=0.0329
+  [1] Video  prob=0.0358
+  ...
+
+dstt> /info
+DSTT Model
+  Format:          .dstt v1
+  Embed dim:       32
+  Param dim:       32
+  Vocabulary:      404 tokens
+
+dstt> /train training_data/example.jsonl models/new_model.dstt
+Loaded 24 training examples
+Training...
+  Epoch 0  fitness=0.9995  loss=0.0005
+Model saved to models/new_model.dstt and loaded.
+```
+
+CLI commands:
+
+| Command | Description |
+|---------|-------------|
+| `/load <path.dstt>` | Load a trained model |
+| `/info` | Show model metadata |
+| `/steps <n>` | Set generation steps |
+| `/train <data> <out>` | Train from data file, save as .dstt |
+| `/help` | Show help |
+| `/quit` | Exit |
+
+### Training from Files
+
+Training data goes in the `training_data/` directory. Three formats are supported:
+
+**JSONL** (recommended — supports all modalities):
+```jsonl
+{"input": "A sunset over mountains", "modality": "Image"}
+{"input": "Breaking news about science", "modality": "Text"}
+{"input": "Time-lapse of a flower", "modality": "Video"}
+```
+
+**CSV:**
+```csv
+input,modality
+A sunset over mountains,Image
+Breaking news about science,Text
+```
+
+**Plain text** (defaults to Text modality):
+```text
+A sunset over mountains
+Breaking news about science
+```
+
+### Train and Save Programmatically
+
+```cpp
+dstt::DSTTModel model(cfg);
+auto examples = dstt::DSTTModel::load_training_jsonl("training_data/example.jsonl");
+model.train_and_save(examples, "models/my_model.dstt",
+    [](const dstt::EpochStats& s) {
+        std::cout << "Epoch " << s.epoch << " loss=" << s.avg_loss << "\n";
+    });
+```
+
 ## Architecture
 
 ### Tokenizer (BPE)
@@ -82,6 +189,7 @@ F = w_c * Coherence + w_r * Relevance + w_d * Diversity
 | **EA** | Evolves parameter configurations across generations |
 | **MGE** | Orchestrates generation: branch prediction + synthesis + consistency |
 | **Trainer** | Training loop: tokenizer building, FDMP weight updates, embedding updates |
+| **DSTTModel** | .dstt file I/O, model loading, inference interface, training data loaders |
 
 ## Training
 
@@ -172,6 +280,16 @@ Five test suites: partitioning, CFM/AFM, EA operators, integration, and **traini
 
 The demo runs all three phases: trains on a small corpus, then generates multi-modal output for three different prompts.
 
+### Running the Interactive CLI
+
+```bash
+# Train from data and start interactive session
+./dstt_cli
+
+# Or load an existing .dstt model directly
+./dstt_cli models/my_model.dstt
+```
+
 ## Project Structure
 
 ```
@@ -179,6 +297,13 @@ dstt-full/
 ├── CMakeLists.txt
 ├── README.md
 ├── LICENSE
+├── models/                    # Trained .dstt model files go here
+│   └── .gitkeep
+├── training_data/             # Training data files (JSONL, CSV, TXT)
+│   ├── example.jsonl          # Example JSONL training data
+│   ├── example.csv            # Example CSV training data
+│   ├── example.txt            # Example plain text training data
+│   └── README.md              # Training data format documentation
 ├── include/dstt/
 │   ├── core/
 │   │   ├── types.hpp          # Types, enums, Config (incl. training params)
@@ -200,6 +325,9 @@ dstt-full/
 │   │   ├── mge.hpp            # Multimedia Generation Engine
 │   │   ├── branch_predictor.hpp
 │   │   └── synthesiser.hpp    # Output synthesis
+│   ├── model/
+│   │   ├── dstt_format.hpp    # .dstt binary file format specification
+│   │   └── dstt_model.hpp     # Model loading, saving, and inference API
 │   ├── training/
 │   │   └── trainer.hpp        # Training loop + save/load
 │   └── utils/
@@ -211,6 +339,7 @@ dstt-full/
 │   ├── ea/          # Chromosome, operators, fitness, population
 │   ├── fdmp/        # FDMP, tokenizer, embeddings
 │   ├── mge/         # MGE, branch predictor, synthesiser
+│   ├── model/       # DSTTModel (.dstt file I/O + inference)
 │   ├── training/    # Trainer
 │   └── utils/       # Math, RNG
 ├── tests/
@@ -220,7 +349,8 @@ dstt-full/
 │   ├── test_integration.cpp
 │   └── test_training.cpp      # Tokenizer + training tests
 └── examples/
-    └── demo.cpp               # Full pipeline demo (train → evolve → generate)
+    ├── demo.cpp               # Full pipeline demo (train → evolve → generate)
+    └── dstt_cli.cpp           # Interactive CLI for .dstt model files
 ```
 
 ## Configuration
