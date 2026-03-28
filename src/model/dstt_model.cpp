@@ -54,6 +54,11 @@ void DSTTModel::write_to_stream(std::ostream& out) const {
     cb.mutation_rate     = cfg_.mutation_rate;
     out.write(reinterpret_cast<const char*>(&cb), sizeof(cb));
 
+    // ── System prompt ──
+    uint32_t sp_len = static_cast<uint32_t>(cfg_.system_prompt.size());
+    out.write(reinterpret_cast<const char*>(&sp_len), sizeof(sp_len));
+    out.write(cfg_.system_prompt.data(), static_cast<std::streamsize>(sp_len));
+
     // ── Vocabulary ──
     const auto& t2i = tokenizer_.token_to_id();
     uint32_t vocab_count = static_cast<uint32_t>(t2i.size());
@@ -116,6 +121,12 @@ void DSTTModel::read_from_stream(std::istream& in) {
     cfg_.tournament_k      = cb.tournament_k;
     cfg_.elitism_rate      = cb.elitism_rate;
     cfg_.mutation_rate     = cb.mutation_rate;
+
+    // ── System prompt ──
+    uint32_t sp_len = 0;
+    in.read(reinterpret_cast<char*>(&sp_len), sizeof(sp_len));
+    cfg_.system_prompt.resize(sp_len);
+    in.read(&cfg_.system_prompt[0], static_cast<std::streamsize>(sp_len));
 
     // Reinitialize components with loaded config
     fdmp_ = FDMP(cfg_);
@@ -201,9 +212,14 @@ GenerationResult DSTTModel::run(const std::string& prompt,
     std::array<ModalityState, MODALITY_COUNT> states;
     Vec init_prev(cfg_.embed_dim, 0.0);
 
+    // Prepend system prompt to user prompt (same as during training)
+    std::string full_prompt = cfg_.system_prompt.empty()
+        ? prompt
+        : cfg_.system_prompt + " " + prompt;
+
     for (size_t mi = 0; mi < MODALITY_COUNT; ++mi) {
         Modality m = static_cast<Modality>(mi);
-        std::vector<uint32_t> tokens = tokenizer_.encode(prompt);
+        std::vector<uint32_t> tokens = tokenizer_.encode(full_prompt);
         Vec context = tokenizer_.embed_tokens(tokens);
         states[mi].context = context;
 
@@ -347,9 +363,12 @@ SynthesisedOutput DSTTModel::generate_raw(const std::string& prompt,
     std::array<ModalityState, MODALITY_COUNT> states;
     Vec init_prev(cfg_.embed_dim, 0.0);
 
+    std::string full_prompt = cfg_.system_prompt.empty()
+        ? prompt : cfg_.system_prompt + " " + prompt;
+
     for (size_t mi = 0; mi < MODALITY_COUNT; ++mi) {
         Modality m = static_cast<Modality>(mi);
-        std::vector<uint32_t> tokens = tokenizer_.encode(prompt);
+        std::vector<uint32_t> tokens = tokenizer_.encode(full_prompt);
         Vec context = tokenizer_.embed_tokens(tokens);
         states[mi].context = context;
         Config ea_cfg = cfg_;
@@ -396,6 +415,20 @@ SynthesisedOutput DSTTModel::generate_raw(const std::string& prompt,
 
 // ── Model info ──────────────────────────────────────────────────────
 
+static std::string format_params(size_t n) {
+    if (n >= 1'000'000'000) {
+        return std::to_string(n / 1'000'000'000) + "."
+             + std::to_string((n / 100'000'000) % 10) + "B";
+    } else if (n >= 1'000'000) {
+        return std::to_string(n / 1'000'000) + "."
+             + std::to_string((n / 100'000) % 10) + "M";
+    } else if (n >= 1'000) {
+        return std::to_string(n / 1'000) + "."
+             + std::to_string((n / 100) % 10) + "K";
+    }
+    return std::to_string(n);
+}
+
 std::string DSTTModel::info() const {
     std::ostringstream ss;
     ss << "DSTT Model";
@@ -404,10 +437,13 @@ std::string DSTTModel::info() const {
         return ss.str();
     }
     ss << "\n  Format:          .dstt v" << DSTT_VERSION;
+    ss << "\n  Parameters:      " << format_params(cfg_.total_parameters())
+       << " (" << cfg_.total_parameters() << ")";
     ss << "\n  Embed dim:       " << cfg_.embed_dim;
     ss << "\n  Param dim:       " << cfg_.param_dim;
     ss << "\n  Vocabulary:      " << tokenizer_.actual_vocab_size() << " tokens";
     ss << "\n  Modalities:      " << MODALITY_COUNT << " (Text, Image, Video)";
+    ss << "\n  System prompt:   \"" << cfg_.system_prompt << "\"";
     ss << "\n  Population:      " << cfg_.population_size;
     ss << "\n  Max generations: " << cfg_.max_generations;
     ss << "\n  Training LR:     " << cfg_.training_lr;

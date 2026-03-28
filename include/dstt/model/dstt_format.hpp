@@ -47,6 +47,9 @@ struct DSTTConfigBlock {
     double mutation_rate       = 0.0;
 };
 
+/// System prompt block stored after DSTTConfigBlock.
+/// Length-prefixed string: uint32_t length, then that many chars.
+
 /// Returns the expected file extension for DSTT model files.
 inline std::string dstt_extension() { return ".dstt"; }
 

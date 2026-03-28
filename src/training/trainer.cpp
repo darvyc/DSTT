@@ -18,8 +18,11 @@ void Trainer::build_tokenizer(const std::vector<std::string>& corpus) {
 }
 
 std::pair<double, double> Trainer::train_step(const TrainingExample& ex) {
-    // 1. Tokenize and embed
-    std::vector<uint32_t> tokens = tokenizer_.encode(ex.input);
+    // 1. Tokenize and embed (system prompt prepended as context)
+    std::string full_input = cfg_.system_prompt.empty()
+        ? ex.input
+        : cfg_.system_prompt + " " + ex.input;
+    std::vector<uint32_t> tokens = tokenizer_.encode(full_input);
     Vec context = tokenizer_.embed_tokens(tokens);
 
     // 2. Generate raw parameters from FDMP
@@ -107,9 +110,12 @@ void Trainer::update_embeddings(const std::vector<uint32_t>& tokens,
 void Trainer::train(const std::vector<TrainingExample>& examples,
                     EpochCallback on_epoch) {
     if (!tokenizer_.is_trained()) {
-        // Auto-build tokenizer from training inputs
+        // Auto-build tokenizer from training inputs + system prompt
         std::vector<std::string> corpus;
-        corpus.reserve(examples.size());
+        corpus.reserve(examples.size() + 1);
+        if (!cfg_.system_prompt.empty()) {
+            corpus.push_back(cfg_.system_prompt);
+        }
         for (const auto& ex : examples) {
             corpus.push_back(ex.input);
         }
