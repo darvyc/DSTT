@@ -54,6 +54,24 @@ const Vec& FDMP::bias_vector(Modality m) const {
     return b_text_;
 }
 
+Vec& FDMP::weight_matrix_mut(Modality m) {
+    switch (m) {
+        case Modality::Text:  return W_text_;
+        case Modality::Image: return W_image_;
+        case Modality::Video: return W_video_;
+    }
+    return W_text_;
+}
+
+Vec& FDMP::bias_vector_mut(Modality m) {
+    switch (m) {
+        case Modality::Text:  return b_text_;
+        case Modality::Image: return b_image_;
+        case Modality::Video: return b_video_;
+    }
+    return b_text_;
+}
+
 Vec FDMP::encode(const std::string& input, Modality m) const {
     return Embeddings::embed(input, m, cfg_.embed_dim);
 }

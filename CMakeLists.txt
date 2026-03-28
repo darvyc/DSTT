@@ -31,9 +31,11 @@ set(DSTT_SOURCES
     src/ea/population.cpp
     src/fdmp/embeddings.cpp
     src/fdmp/fdmp.cpp
+    src/fdmp/tokenizer.cpp
     src/mge/branch_predictor.cpp
     src/mge/synthesiser.cpp
     src/mge/mge.cpp
+    src/training/trainer.cpp
 )
 
 add_library(dstt_lib ${DSTT_SOURCES})
@@ -56,3 +58,4 @@ dstt_add_test(test_partition   tests/test_partition.cpp)
 dstt_add_test(test_cfm_afm     tests/test_cfm_afm.cpp)
 dstt_add_test(test_ea          tests/test_ea.cpp)
 dstt_add_test(test_integration tests/test_integration.cpp)
+dstt_add_test(test_training    tests/test_training.cpp)

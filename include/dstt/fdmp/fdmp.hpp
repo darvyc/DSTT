@@ -28,15 +28,20 @@ public:
     size_t embed_dim() const { return cfg_.embed_dim; }
     size_t param_dim() const { return cfg_.param_dim; }
 
+    /// Mutable accessors for training updates.
+    Vec& weight_matrix_mut(Modality m);
+    Vec& bias_vector_mut(Modality m);
+
+    /// Read-only accessors (public, for serialization).
+    const Vec& weight_matrix(Modality m) const;
+    const Vec& bias_vector(Modality m) const;
+
 private:
     Config cfg_;
     // Weight matrices stored row-major: W_m is param_dim × embed_dim
     // One per modality
     Vec W_text_, W_image_, W_video_;
     Vec b_text_, b_image_, b_video_;
-
-    const Vec& weight_matrix(Modality m) const;
-    const Vec& bias_vector(Modality m) const;
 
     void init_weights();
 };
