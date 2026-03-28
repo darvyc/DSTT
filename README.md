@@ -48,9 +48,21 @@ mkdir build && cd build
 cmake .. -DCMAKE_BUILD_TYPE=Release
 make -j$(nproc)
 
-# Train a model from example data
+# Launch the interactive CLI
 ./dstt_cli
+
+# Set a system prompt (defines model behavior, like an LLM system message)
+dstt> /system You are an expert landscape photographer and nature writer.
+
+# Set target parameter count (like choosing 7B vs 13B for an LLM)
+dstt> /params 100000
+
+# Train the model
 dstt> /train ../training_data/example.jsonl ../models/my_model.dstt
+System prompt: "You are an expert landscape photographer and nature writer."
+Parameters:    99429
+Training...
+  Epoch 0  fitness=0.9989  loss=0.0011
 
 # Generate content from a prompt
 dstt> A sunset over snow-capped mountains
@@ -75,8 +87,9 @@ A `.dstt` file contains:
 
 | Section | Contents |
 |---------|----------|
-| **Header** | Magic bytes (`DSTT`), version, dimensions |
+| **Header** | Magic bytes (`DSTT`), version, dimensions, parameter count |
 | **Config** | All hyperparameters used during training |
+| **System Prompt** | The training focus prompt (e.g. "Be a helpful assistant.") |
 | **Vocabulary** | BPE token table (token strings + IDs) |
 | **Embeddings** | Token embedding matrix (vocab x embed_dim) |
 | **FDMP Weights** | Per-modality W matrices and bias vectors |
@@ -144,8 +157,10 @@ CLI commands:
 | Command | Description |
 |---------|-------------|
 | `/load <path.dstt>` | Load a trained model |
-| `/info` | Show model metadata |
+| `/info` | Show model metadata (parameters, system prompt, dimensions) |
 | `/steps <n>` | Set generation steps |
+| `/system <prompt>` | Set system prompt for next training run |
+| `/params <n>` | Set target parameter count for next training run |
 | `/save_images` | Toggle saving generated images as PPM files |
 | `/save_video` | Toggle saving video frames as PPM files |
 | `/train <data> <out>` | Train from data file, save as .dstt |
@@ -179,6 +194,10 @@ Breaking news about science
 ### Train and Save Programmatically
 
 ```cpp
+dstt::Config cfg;
+cfg.system_prompt = "You are a creative multimedia assistant.";
+cfg.set_parameter_count(500'000);  // 500K parameters
+
 dstt::DSTTModel model(cfg);
 auto examples = dstt::DSTTModel::load_training_jsonl("training_data/example.jsonl");
 model.train_and_save(examples, "models/my_model.dstt",
@@ -273,6 +292,61 @@ F = w_c * Coherence + w_r * Relevance + w_d * Diversity
 
 ## Training
 
+Training a DSTT model requires two key decisions, just like training an LLM:
+
+1. **System prompt** — defines the model's training focus and behavior. Every training example is processed with this prompt prepended as context, biasing the learned weights toward the specified objective. This is analogous to an LLM system message.
+
+2. **Parameter count** — determines model capacity. Higher parameter counts allow the model to learn more complex patterns but require more compute. DSTT computes total parameters as:
+   ```
+   Total = vocab_size × embed_dim + 3 × (param_dim × embed_dim + param_dim)
+           \___ token embeddings ___/   \___ FDMP weights (3 modalities) ___/
+   ```
+
+### System Prompt
+
+The system prompt steers training. It is prepended to every training example during tokenization, so the learned embeddings and FDMP weights encode the specified behavior:
+
+```cpp
+cfg.system_prompt = "You are an expert landscape photographer and nature writer.";
+```
+
+Examples:
+
+| System Prompt | Effect |
+|---------------|--------|
+| `"Be a helpful assistant."` | General-purpose (default) |
+| `"You are a creative storyteller."` | Text-focused generation |
+| `"You are a visual artist specializing in landscapes."` | Image-focused generation |
+| `"You are a cinematographer creating nature documentaries."` | Video-focused generation |
+
+The system prompt is stored in the `.dstt` file and automatically applied at inference time.
+
+### Parameter Count
+
+Specify a target parameter count and DSTT derives the optimal `embed_dim` and `param_dim`:
+
+```cpp
+Config cfg;
+cfg.system_prompt = "Be a helpful assistant.";
+cfg.vocab_size    = 4096;
+
+// Set target parameter count (like choosing 7B vs 13B for an LLM)
+cfg.set_parameter_count(500'000);  // 500K parameters
+// -> embed_dim = 105, param_dim = 52
+// -> actual: 500,076 parameters
+
+std::cout << cfg.total_parameters() << "\n";  // 500076
+```
+
+Example parameter scales:
+
+| Target | embed_dim | param_dim | Actual | Use case |
+|--------|-----------|-----------|--------|----------|
+| 50K | 32 | 16 | ~50K | Quick experiments |
+| 500K | 105 | 52 | ~500K | Small models |
+| 5M | 328 | 164 | ~5M | Medium models |
+| 50M | 1024 | 512 | ~50M | Large models |
+
 ### Training Data
 
 Training examples pair input text with a target modality:
@@ -289,9 +363,11 @@ std::vector<TrainingExample> data = {
 
 ```cpp
 Config cfg;
+cfg.system_prompt   = "You are a creative multimedia assistant.";
 cfg.training_epochs = 10;
 cfg.training_lr     = 0.005;
 cfg.vocab_size      = 4096;
+cfg.set_parameter_count(500'000);  // 500K parameters
 
 Trainer trainer(cfg);
 trainer.train(data, [](const EpochStats& stats) {
@@ -320,8 +396,9 @@ loaded.load("models/my_model");
 
 | | Training | Inference |
 |---|---------|-----------|
-| **Input** | Corpus of (text, modality) pairs | Single prompt |
-| **Tokenizer** | Builds BPE vocabulary | Uses learned vocabulary |
+| **Input** | System prompt + corpus of (text, modality) pairs | System prompt + user prompt |
+| **Tokenizer** | Builds BPE vocabulary (includes system prompt) | Uses learned vocabulary |
+| **System prompt** | Prepended to every example, shapes learned weights | Prepended to user prompt automatically |
 | **FDMP weights** | Updated each step | Frozen |
 | **EA** | Short runs (signal for weight updates) | Full runs (parameter optimization) |
 | **Output** | Trained .dstt model file | Generated text, images, and video |
@@ -463,11 +540,13 @@ Key hyperparameters (set in `include/dstt/core/types.hpp` or at runtime):
 
 | Parameter | Default | Description |
 |-----------|---------|-------------|
+| `system_prompt` | `"Be a helpful assistant."` | Training focus prompt (prepended to all examples) |
 | `training_epochs` | 10 | Number of passes over the training corpus |
 | `training_lr` | 0.005 | Learning rate for FDMP weight updates |
 | `vocab_size` | 4096 | Maximum BPE vocabulary size |
 | `min_token_freq` | 2 | Minimum pair frequency for BPE merges |
 | `weight_decay` | 1e-4 | L2 regularization on weights |
+| `set_parameter_count(n)` | — | Derives embed_dim and param_dim from target parameter count |
 
 ## License
 

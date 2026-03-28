@@ -22,14 +22,16 @@ static void print_banner() {
 
 static void print_help() {
     std::cout << "\nCommands:\n"
-              << "  /load <path.dstt>   Load a trained .dstt model file\n"
-              << "  /info               Show model metadata\n"
-              << "  /steps <n>          Set generation steps (default: 12)\n"
-              << "  /save_images        Toggle saving images to disk (default: off)\n"
-              << "  /save_video         Toggle saving video frames to disk (default: off)\n"
-              << "  /train <data> <out> Train from data file, save as .dstt\n"
-              << "  /help               Show this help\n"
-              << "  /quit               Exit\n"
+              << "  /load <path.dstt>     Load a trained .dstt model file\n"
+              << "  /info                 Show model metadata\n"
+              << "  /steps <n>            Set generation steps (default: 12)\n"
+              << "  /save_images          Toggle saving images to disk (default: off)\n"
+              << "  /save_video           Toggle saving video frames to disk (default: off)\n"
+              << "  /system <prompt>      Set system prompt for next training run\n"
+              << "  /params <n>           Set target parameter count for next training run\n"
+              << "  /train <data> <out>   Train from data file, save as .dstt\n"
+              << "  /help                 Show this help\n"
+              << "  /quit                 Exit\n"
               << "\n  Any other input is treated as a generation prompt.\n"
               << "  The model generates text, images, and/or video based on\n"
               << "  the prompt — the branch predictor selects the modality.\n\n";
@@ -162,6 +164,8 @@ int main(int argc, char* argv[]) {
     size_t steps = 12;
     bool save_images = false;
     bool save_video = false;
+    std::string train_system_prompt = "Be a helpful assistant.";
+    size_t train_target_params = 0;  // 0 = use defaults
 
     // If a model path was provided as argument, load it
     if (argc >= 2) {
@@ -209,6 +213,12 @@ int main(int argc, char* argv[]) {
         } else if (line.substr(0, 7) == "/steps ") {
             steps = std::stoul(line.substr(7));
             std::cout << "Generation steps set to " << steps << "\n";
+        } else if (line.substr(0, 8) == "/system ") {
+            train_system_prompt = line.substr(8);
+            std::cout << "System prompt set to: \"" << train_system_prompt << "\"\n";
+        } else if (line.substr(0, 8) == "/params ") {
+            train_target_params = std::stoul(line.substr(8));
+            std::cout << "Target parameters set to: " << train_target_params << "\n";
         } else if (line.substr(0, 7) == "/train ") {
             std::string args = line.substr(7);
             size_t space = args.find(' ');
@@ -230,14 +240,26 @@ int main(int argc, char* argv[]) {
                 }
 
                 std::cout << "Loaded " << examples.size() << " training examples\n";
-                std::cout << "Training...\n";
 
                 Config cfg;
+                cfg.system_prompt   = train_system_prompt;
                 cfg.training_epochs = 3;
                 cfg.training_lr     = 0.005;
                 cfg.vocab_size      = 512;
-                cfg.param_dim       = 32;
-                cfg.embed_dim       = 32;
+
+                if (train_target_params > 0) {
+                    cfg.set_parameter_count(train_target_params);
+                    std::cout << "Target params: " << train_target_params
+                              << " -> embed_dim=" << cfg.embed_dim
+                              << " param_dim=" << cfg.param_dim << "\n";
+                } else {
+                    cfg.param_dim       = 32;
+                    cfg.embed_dim       = 32;
+                }
+
+                std::cout << "System prompt: \"" << cfg.system_prompt << "\"\n";
+                std::cout << "Parameters:    " << cfg.total_parameters() << "\n";
+                std::cout << "Training...\n";
                 cfg.population_size = 30;
                 cfg.max_generations = 40;
 
