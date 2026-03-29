@@ -403,6 +403,581 @@ loaded.load("models/my_model");
 | **EA** | Short runs (signal for weight updates) | Full runs (parameter optimization) |
 | **Output** | Trained .dstt model file | Generated text, images, and video |
 
+## Mathematical Foundations
+
+This section provides the complete mathematical and algorithmic specification behind every DSTT subsystem.
+
+### Linear Algebra Primitives
+
+DSTT builds on a small set of core operations used throughout the pipeline.
+
+**Dot product:**
+
+```
+dot(a, b) = Σᵢ aᵢ · bᵢ
+```
+
+**L2 norm:**
+
+```
+‖a‖ = √(Σᵢ aᵢ²)
+```
+
+**Cosine similarity:**
+
+```
+cos_sim(a, b) = dot(a, b) / (‖a‖ · ‖b‖)
+```
+
+Returns 0 when either norm is below `1e-12`. Range: `[-1, 1]`.
+
+**Numerically stable softmax:**
+
+```
+softmax(v)ᵢ = exp(vᵢ - max(v)) / Σⱼ exp(vⱼ - max(v))
+```
+
+**Affine transform (linear layer):**
+
+```
+y = W · x + b     where W ∈ ℝ^{rows × cols}, x ∈ ℝ^{cols}, b ∈ ℝ^{rows}
+```
+
+**Shannon self-information:**
+
+```
+H(p) = -p · log₂(p)     (returns 0 for p ≤ 0)
+```
+
+**Hamming distance** (binary-thresholded vectors):
+
+```
+d_H(a, b) = Σᵢ 𝟙{sign(aᵢ) ≠ sign(bᵢ)}
+```
+
+Each element is thresholded at 0 to produce a binary representation before comparison.
+
+**Inverse-CDF sampling:**
+
+```
+Given probabilities P = [p₀, p₁, ..., pₙ₋₁] and u ~ Uniform(0, 1):
+  return argmin{j : Σᵢ₌₀ʲ pᵢ ≥ u}
+```
+
+**Hardy-Ramanujan partition count** (used by the partitioning engine):
+
+```
+k = ⌊log₂(p(m))⌋     where log₂(p(m)) ≈ π√(2m/3) / ln(2) - log₂(4m√3)
+```
+
+At least 2 partitions are always returned.
+
+---
+
+### BPE Tokenizer
+
+The tokenizer converts raw text into token IDs and dense context vectors.
+
+**Vocabulary construction (Byte-Pair Encoding):**
+
+1. Initialize vocabulary with 256 byte-level tokens
+2. Repeat until `vocab_size` is reached:
+   - Count all adjacent pair frequencies across the corpus
+   - Find the most frequent pair `(a, b)`
+   - If frequency < `min_token_freq`, stop
+   - Register merged token `m = concat(a, b)` and apply the merge across all sequences
+
+**Embedding initialization (Xavier/Glorot uniform):**
+
+```
+limit = √(6 / (vocab_size + embed_dim))
+E[i, d] ~ Uniform(-limit, limit)
+```
+
+`E ∈ ℝ^{vocab_size × embed_dim}` is a learnable matrix updated during training.
+
+**Context vector computation:**
+
+```
+C = (1 / |tokens|) · Σᵢ E[tokenᵢ]
+C ← C / ‖C‖
+```
+
+The context vector is the L2-normalized mean of token embeddings.
+
+---
+
+### Modality-Specific Embedding Helpers
+
+Synthetic embeddings are generated via an xorshift hash when a deterministic modality-specific vector is needed:
+
+```
+hash_embed(input, dim, salt):
+  h ← hash(input) ⊕ salt
+  for d = 0 to dim-1:
+    h ← h ⊕ (h << 13)
+    h ← h ⊕ (h >> 7)
+    h ← h ⊕ (h << 17)
+    v[d] ← (h & 0xFFFF) / 32768 - 1          // map to [-1, 1]
+  return v / ‖v‖                               // L2 normalize
+```
+
+| Modality | Salt |
+|----------|------|
+| Text | `0xCAFE'BABE'0001` |
+| Image | `0xDEAD'BEEF'0002` |
+| Video | `0xFEED'FACE'0003` |
+
+---
+
+### FDMP (Fundamental Data Matrix Processor)
+
+The FDMP maps context embeddings to raw parameter vectors via a per-modality linear layer.
+
+**Weight initialization (Xavier uniform, per modality `m`):**
+
+```
+limit = √(6 / (param_dim + embed_dim))
+W_m[i, j] ~ Uniform(-limit, limit)       W_m ∈ ℝ^{param_dim × embed_dim}
+b_m[i]    ~ Uniform(-0.01, 0.01)         b_m ∈ ℝ^{param_dim}
+```
+
+**Parameter generation (forward pass):**
+
+```
+C    = encode(input, modality)            // context embedding ∈ ℝ^{embed_dim}
+Θ_r  = W_m · C + b_m                     // raw parameters ∈ ℝ^{param_dim}
+```
+
+This is a standard affine transform — the trained analogue of a single dense layer mapping from context space to parameter space.
+
+---
+
+### Partition Engine
+
+The partition engine groups parameters into coherent clusters using a Ramsey-theoretic measure.
+
+**Parameter embedding:**
+
+```
+For parameter θⱼ and context C:
+  e[d] = θⱼ · C[d mod |C|]               (d = 0, ..., embed_dim - 1)
+```
+
+This creates a per-parameter embedding by modulating the context with the scalar parameter value.
+
+**Ramsey coherence (normalized Hamming similarity):**
+
+```
+R_c(θᵢ, θⱼ, C) = 1 - d_H(embed(θᵢ), embed(θⱼ)) / embed_dim
+```
+
+Two parameters are considered coherent when their binary-thresholded embeddings agree on most dimensions.
+
+**Partitioning algorithm (Union-Find):**
+
+```
+Input:  Θ ∈ ℝ^m, context C, threshold τ (default 0.25)
+Output: Disjoint partition set over {0, ..., m-1}
+
+1. Compute parameter embeddings eᵢ for all i
+2. Initialize Union-Find with m singleton sets
+3. For each pair (i, j) where i < j:
+     if R_c(θᵢ, θⱼ, C) > τ:
+       Union-Find.merge(i, j)
+4. Extract partitions from Union-Find
+```
+
+---
+
+### CFM (Correct Flow Matrix)
+
+The CFM assigns a positive score to parameters that are contextually coherent.
+
+```
+CFM(θⱼ) = Ws(θⱼ) + Rc(θⱼ)
+```
+
+| Term | Name | Formula |
+|------|------|---------|
+| `Ws` | Wittgenstein Score | `cos_sim(embed(θⱼ), C) · α_m` |
+| `Rc` | Ramsey Coherence | `1 - d_H(embed(θⱼ), S_prev) / dim` |
+
+Where `C` is the context embedding, `S_prev` is the previous state embedding, and `α_m` is a per-modality weight:
+
+| Modality | α_m |
+|----------|-----|
+| Text | 0.85 |
+| Image | 0.80 |
+| Video | 0.75 |
+
+---
+
+### AFM (Adversarial Flow Matrix)
+
+The AFM penalizes parameters that contradict the context or carry low information.
+
+```
+AFM(θⱼ) = Ca(θⱼ) + Es(θⱼ)
+```
+
+| Term | Name | Formula |
+|------|------|---------|
+| `Ca` | Contradiction Score | `max(0, -cos_sim(embed(θⱼ), C))` |
+| `Es` | Entropy Score | `-P(θⱼ) · log₂(P(θⱼ))` |
+
+Where `P(θⱼ)` is the current probability of parameter `j` (initialized to `1/m` for uniform).
+
+---
+
+### ARM (Autonomous Route Matrix)
+
+The ARM is the central evaluation pipeline that combines partitioning, CFM/AFM scoring, parameter adjustment, and sampling into a single pass.
+
+```
+Input:  Θ ∈ ℝ^m, context C ∈ ℝ^n, previous state S_prev ∈ ℝ^n, modality
+Output: ARMResult {CFM[], AFM[], Θ', P[], sampled index j*, partitions}
+
+Algorithm:
+1. Partition Θ into coherent groups via Union-Find (threshold τ)
+2. For each j = 0, ..., m-1:
+     Compute parameter embedding: embed(θⱼ)
+     CFM[j] = cos_sim(embed(θⱼ), C) · α_m + (1 - d_H(embed(θⱼ), S_prev) / dim)
+     AFM[j] = max(0, -cos_sim(embed(θⱼ), C)) + H(1/m)
+3. Adjust parameters:
+     Θ'[j] = θⱼ · (CFM[j] - AFM[j])
+4. Compute probability distribution:
+     P = softmax(Θ')
+5. Sample:
+     j* ~ P via inverse-CDF sampling
+```
+
+---
+
+### Evolutionary Algorithm
+
+The EA evolves parameter vectors across generations using bio-inspired operators.
+
+**Chromosome encoding:**
+
+```
+Genes g ∈ [0, 1]^m encode parameters directly (identity decoding).
+Each chromosome carries a scalar fitness value.
+```
+
+**Fitness function:**
+
+```
+F = w_c · Coherence + w_r · Relevance + w_d · Diversity
+```
+
+Default weights: `w_c = 0.4`, `w_r = 0.4`, `w_d = 0.2`.
+
+**Coherence** — fraction of probability mass on parameters where CFM dominates AFM:
+
+```
+Coherence = Σⱼ P[j] · 𝟙{CFM[j] > AFM[j]}
+```
+
+**Relevance** — cosine similarity between probability-weighted parameter embedding and context, normalized to `[0, 1]`:
+
+```
+V[d] = Σⱼ P[j] · θⱼ · C[d mod |C|]
+Relevance = (cos_sim(V, C_slice) + 1) / 2
+```
+
+**Diversity** — normalized Shannon entropy of the probability distribution:
+
+```
+Diversity = -Σⱼ P[j] · log₂(P[j]) / log₂(m)
+```
+
+**Tournament selection:**
+
+```
+Select k random individuals from the population.
+Return the one with the highest fitness.
+k is clamped to population_size.
+```
+
+**Single-point crossover:**
+
+```
+Choose random crossover point c ∈ [1, dim-1].
+offspring₁ = parent₁[0:c] ‖ parent₂[c:]
+offspring₂ = parent₂[0:c] ‖ parent₁[c:]
+```
+
+**Random-resetting mutation:**
+
+```
+For each gene gⱼ:
+  if Uniform() < μ:
+    gⱼ ← Uniform(0, 1)
+
+μ_eff = (mutation_rate > 0) ? mutation_rate : 1/param_dim
+```
+
+**Generational loop:**
+
+```
+1. Initialize population of pop_size random chromosomes
+2. For generation g = 0, ..., max_generations-1:
+   a. Evaluate fitness for every chromosome via ARM pipeline
+   b. Sort population by fitness (descending)
+   c. Copy top ⌈elitism_rate · pop_size⌉ elites into next generation
+   d. Fill remaining slots:
+        Select two parents via tournament selection
+        Apply single-point crossover → two offspring
+        Mutate each offspring
+        Add to next generation
+   e. Replace population
+   f. Convergence check:
+        If best fitness has not improved by more than 1e-6
+        over the last 20 generations, stop early
+3. Return best individual
+```
+
+---
+
+### MGE (Multimedia Generation Engine)
+
+The MGE orchestrates multi-step, multi-modal generation.
+
+**Branch predictor (softmax classifier):**
+
+```
+logits[m] = W_m · C + b_m       for m ∈ {Text, Image, Video}
+probs = softmax(logits)
+predicted = argmax(probs)
+confidence = probs[predicted]
+```
+
+If `confidence < 0.6`, the predictor falls back to whichever modality has gone longest without generation.
+
+**Branch predictor online update (gradient descent):**
+
+```
+grad[m] = probs[m] - 𝟙{m == target}
+b_m ← b_m - 0.01 · grad[m]
+W_m ← W_m - 0.01 · grad[m] · C
+```
+
+**Cross-modal consistency check:**
+
+```
+For adjacent elements e_prev and e_curr with different modalities:
+  similarity = cos_sim(e_prev.embedding, e_curr.embedding)
+  threshold  = 0.3  if e_curr is Video, else 0.7
+  consistent = (similarity > threshold)
+```
+
+If inconsistent, the MGE regenerates using the least-recently-used modality instead.
+
+**Context update (exponential moving average):**
+
+```
+C_new = 0.8 · C_old + 0.2 · element_embedding
+```
+
+**Full generation pipeline:**
+
+```
+Phase 1 — Per-modality optimization:
+  For each modality m ∈ {Text, Image, Video}:
+    C_m     ← FDMP.encode(input, m)
+    Θ_raw   ← FDMP.generate_params(C_m, m)
+    Θ_best  ← EA.evolve(C_m, m)           // full evolutionary run
+
+Phase 2 — Multi-step generation:
+  For step = 0, ..., steps-1:
+    (modality, confidence) ← BranchPredictor.predict(C_current)
+    if confidence < 0.6:
+      modality ← least recently generated modality
+    Θ ← Θ_best[modality]
+    element ← ARM.evaluate(Θ, C_current, S_prev, modality)
+    content ← ContentGenerator.generate(element, modality)
+    if not consistent(element):
+      regenerate with fallback modality
+    S_prev    ← C_current
+    C_current ← 0.8 · C_current + 0.2 · element.embedding
+    BranchPredictor.update(C_current, modality)
+```
+
+---
+
+### Content Generator
+
+The ContentGenerator transforms ARM-optimized parameters into concrete output.
+
+#### Text Generation
+
+```
+Input:  ARM probabilities P, parameters Θ, context C, tokenizer, temperature T
+Output: Generated text string
+
+1. Build parameter embedding:
+     param_embed[d] = Σⱼ P[j] · θⱼ · C[d mod |C|]
+
+2. Score every vocabulary token:
+     For each token t:
+       sim_param = cos_sim(E[t], param_embed)
+       sim_ctx   = cos_sim(E[t], C)
+       score[t]  = (0.6 · sim_param + 0.4 · sim_ctx) / T
+
+3. Convert to probabilities:
+     token_probs = softmax(scores)
+
+4. Sample tokens sequentially via inverse-CDF:
+     For i = 1, ..., num_tokens:
+       token_id ← sample(token_probs)
+       token_probs[token_id] *= 0.3          // repetition penalty
+       renormalize token_probs
+
+5. Decode sampled token IDs back to text
+```
+
+#### Image Generation
+
+```
+Input:  Θ ∈ ℝ^m, context C ∈ ℝ^n, width, height
+Output: RGB pixel grid ∈ [0, 1]^{width × height × 3}
+
+For each pixel (x, y):
+  1. Normalize coordinates:
+       u = x / width,  v = y / height
+
+  2. Spatial hash to parameter indices:
+       ti = ((x·7 + y·13) ⊕ (x·y))        mod m
+       tj = ((x·11 + y·3 + 1) ⊕ (x + y·5)) mod m
+       tk = ((x·5 + y·17 + 2) ⊕ (x·3 + y)) mod m
+
+  3. Cyclic context indices:
+       ci = (ti·3)     mod n
+       cj = (tj·3 + 1) mod n
+       ck = (tk·3 + 2) mod n
+
+  4. Spatial phase shifts (produce coherent gradients):
+       phase_r = sin(2πu) · 1.5
+       phase_g = cos(2πv) · 1.5
+       phase_b = sin((u + v) · π) · 1.5
+
+  5. Sigmoid color mapping:
+       R = σ(θ[ti] · C[ci] · 4 + phase_r)
+       G = σ(θ[tj] · C[cj] · 4 + phase_g)
+       B = σ(θ[tk] · C[ck] · 4 + phase_b)
+
+       where σ(x) = 1 / (1 + exp(-x))
+```
+
+#### Video Generation
+
+```
+Input:  Θ ∈ ℝ^m, context C, previous frame, frame index f, width, height
+Output: Single frame pixel grid
+
+1. Temporal phase:
+     t = f · 0.1
+
+2. Temporal parameter modulation:
+     For each j:
+       phase_j  = j · π / m
+       Θ_t[j]   = θ[j] · (1 + 0.3 · sin(2π·t + phase_j))
+
+3. Generate frame pixels using Θ_t (same spatial logic as images),
+   but with time-varying phase shifts:
+     phase_r = sin(2πu + t)     · 1.5
+     phase_g = cos(2πv + 0.7·t) · 1.5
+     phase_b = sin((u+v)·π + 1.3·t) · 1.5
+
+4. Temporal blending for smooth motion:
+     If a previous frame exists:
+       pixel[i] = 0.7 · pixel[i] + 0.3 · prev_frame[i]
+```
+
+---
+
+### Training Algorithm
+
+Training updates the FDMP weights and token embeddings using the EA fitness signal.
+
+**Training loop:**
+
+```
+Phase 0 — Tokenizer preparation:
+  Corpus ← [system_prompt] ∪ [example.input for all examples]
+  Tokenizer.build_vocab(corpus)                   // BPE merges
+
+Phase 1 — Epoch loop:
+  For epoch = 0, ..., training_epochs-1:
+    For each training example (input, target_modality):
+      full_input ← system_prompt + " " + input
+      tokens     ← Tokenizer.encode(full_input)
+      C          ← Tokenizer.embed_tokens(tokens)     // normalized mean embedding
+
+      // Forward pass
+      Θ_raw      ← FDMP.generate_params(C, target_modality)
+
+      // Short EA run (max 20 generations, population 20)
+      Θ_best     ← EA.evolve(C, target_modality)
+      fitness    ← Θ_best.fitness
+      loss       ← 1 - fitness
+
+      // Update weights
+      update_weights(C, target_modality, fitness, loss)
+      update_embeddings(tokens, C, loss)
+
+    Report EpochStats{epoch, avg_fitness, avg_loss, best_fitness}
+```
+
+**FDMP weight update (sign-based gradient approximation with L2 decay):**
+
+```
+For modality m with weight matrix W_m and bias b_m:
+  For i = 0, ..., param_dim-1:
+    s_i = sign(θ[i])                          // +1 or -1
+
+    // Bias update
+    b_m[i] ← b_m[i] - lr · (loss · s_i) - wd · b_m[i]
+
+    // Weight update
+    For j = 0, ..., embed_dim-1:
+      W_m[i,j] ← W_m[i,j] - lr · (loss · s_i · C[j]) - wd · W_m[i,j]
+
+lr = training_lr (default 0.005)
+wd = weight_decay (default 1e-4)
+```
+
+**Token embedding update (regularizing gradient):**
+
+```
+scale = loss / |tokens|
+lr_embed = training_lr · 0.1                    // 10x slower than FDMP
+
+For each token t in the input:
+  For d = 0, ..., embed_dim-1:
+    E[t, d] ← E[t, d] - lr_embed · scale · E[t, d]
+```
+
+This acts as a loss-scaled L2 regularization that pulls embeddings toward zero-mean, with larger updates when fitness is poor.
+
+---
+
+### Parameter Count Derivation
+
+Given a target parameter count, DSTT derives `embed_dim` and `param_dim` using a 2:1 ratio heuristic.
+
+```
+Total parameters = vocab_size · E + 3 · (P · E + P)
+
+With the constraint P = E/2:
+  Total ≈ vocab_size · E + 1.5 · E² + 1.5 · E
+
+Solving the quadratic 1.5·E² + vocab_size·E - target = 0:
+  E = (-vocab_size + √(vocab_size² + 6 · target)) / 3
+  P = max(4, E / 2)
+```
+
 ## Building
 
 ### Requirements
