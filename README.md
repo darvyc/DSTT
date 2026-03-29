@@ -4,7 +4,7 @@ A C++17 framework for deterministic, contextually adaptive multimedia generation
 
 ## Overview
 
-DSTT is a trainable system for multi-modal content generation. Like large language models, DSTT has a distinct **training phase** where it learns from data before inference. Unlike LLMs, DSTT does not use attention or transformers — it combines a BPE tokenizer, learnable weight matrices, and an evolutionary algorithm to produce contextually adaptive parameter configurations that drive content synthesis across three modalities.
+DSTT is a trainable system for multi-modal content generation. Like Large Language Models (LLMs), DSTT has a distinct **training phase** where it learns from data before inference. Unlike LLMs, DSTT does not use attention or transformers — it combines a Byte-Pair Encoding (BPE) tokenizer, learnable weight matrices, and an Evolutionary Algorithm (EA) to produce contextually adaptive parameter configurations that drive content synthesis across three modalities.
 
 ### What DSTT Generates
 
@@ -25,17 +25,17 @@ DSTT operates in three phases:
 ```
 Phase 1: Training          Phase 2: Parameter Evolution     Phase 3: Content Generation
 ─────────────────          ──────────────────────────       ───────────────────────────
-Corpus → Tokenizer         Prompt → Tokenizer → FDMP       Branch Predictor → modality
-       → BPE vocab                → ARM (CFM/AFM)          ARM evaluate → sample params
-       → FDMP weight update       → EA evolve              ContentGenerator → text/image/video
+Corpus → Tokenizer         Prompt → Tokenizer → FDMP        Branch Predictor → modality
+       → BPE vocab                → ARM (CFM/AFM)           ARM evaluate → sample params
+       → FDMP weight update       → EA evolve               ContentGenerator → text/image/video
        → Embedding update         → Best parameters        Synthesise → multi-modal output
 ```
 
-**Phase 1 — Training.** A BPE tokenizer builds a sub-word vocabulary from the training corpus. Each training example is tokenized, embedded via learned token embeddings, passed through the FDMP to generate parameters, and evolved by the EA. The resulting fitness signal drives gradient updates to both the FDMP weight matrices and the token embedding table. This is analogous to pre-training in LLMs: the system learns input-to-parameter mappings so that inference starts from a better initialization.
+**Phase 1 — Training.** A BPE tokenizer builds a sub-word vocabulary from the training corpus. Each training example is tokenized, embedded via learned token embeddings, passed through the Fundamental Data Matrix Processor (FDMP) to generate parameters, and evolved by the EA. The resulting fitness signal drives gradient updates to both the FDMP weight matrices and the token embedding table. This is analogous to pre-training in LLMs: the system learns input-to-parameter mappings so that inference starts from a better initialization.
 
-**Phase 2 — Parameter Evolution.** At inference, the input prompt is tokenized and embedded. The FDMP generates raw parameters using its trained weights. The EA then evolves these parameters per modality using CFM (Correct Flow Matrix) and AFM (Adversarial Flow Matrix) scoring. Because the FDMP was trained, fewer EA generations are needed to reach high fitness.
+**Phase 2 — Parameter Evolution.** At inference, the input prompt is tokenized and embedded. The FDMP generates raw parameters using its trained weights. The EA then evolves these parameters per modality using Correct Flow Matrix (CFM) and Adversarial Flow Matrix (AFM) scoring. Because the FDMP was trained, fewer EA generations are needed to reach high fitness.
 
-**Phase 3 — Content Generation.** A branch predictor selects which modality (text, image, or video) to generate at each step. The ARM evaluates optimized parameters and samples from the distribution. The **ContentGenerator** then transforms those parameters into actual content:
+**Phase 3 — Content Generation.** A branch predictor selects which modality (text, image, or video) to generate at each step. The Autonomous Route Matrix (ARM) evaluates optimized parameters and samples from the distribution. The **ContentGenerator** then transforms those parameters into actual content:
 - **Text:** Computes similarity between each vocabulary token's learned embedding and the evolved parameter embedding, applies temperature-controlled softmax, and samples tokens — the same fundamental approach LLMs use, but driven by evolutionary optimization instead of transformer attention.
 - **Image:** Maps evolved parameters to RGB pixel values via `sigmoid(θ[i] · context[j] + spatial_phase)`, producing coherent color gradients modulated by the prompt context.
 - **Video:** Extends image generation with temporal parameter modulation `θ_t[j] = θ[j] · (1 + 0.3·sin(2πt + phase))` and inter-frame blending for smooth motion.
@@ -285,7 +285,7 @@ F = w_c * Coherence + w_r * Relevance + w_d * Diversity
 | **FDMP** | Trained weight matrices that map context embeddings to parameter vectors |
 | **ARM** | Partitions parameter space, evaluates via CFM/AFM, adjusts and samples |
 | **EA** | Evolves parameter configurations across generations |
-| **MGE** | Orchestrates generation: branch prediction + synthesis + consistency |
+| **MGE** (Multimedia Generation Engine) | Orchestrates generation: branch prediction + synthesis + consistency |
 | **Trainer** | Training loop: tokenizer building, FDMP weight updates, embedding updates |
 | **ContentGenerator** | Transforms evolved parameters into text tokens, image pixels, and video frames |
 | **DSTTModel** | .dstt file I/O, model loading, inference, training data loaders |
@@ -427,7 +427,7 @@ cd build
 ctest --output-on-failure
 ```
 
-Five test suites: partitioning, CFM/AFM, EA operators, integration, and **training**.
+Five test suites: partitioning, CFM (Correct Flow Matrix)/AFM (Adversarial Flow Matrix), EA (Evolutionary Algorithm) operators, integration, and **training**.
 
 ### Running the Demo
 
@@ -466,10 +466,10 @@ dstt-full/
 ├── include/dstt/
 │   ├── core/
 │   │   ├── types.hpp          # Types, enums, Config (incl. training params)
-│   │   ├── arm.hpp            # Autonomous Route Matrix
+│   │   ├── arm.hpp            # ARM: Autonomous Route Matrix
 │   │   ├── partition.hpp      # Combinatorial partitioning engine
-│   │   ├── cfm.hpp            # Correct Flow Matrix
-│   │   ├── afm.hpp            # Adversarial Flow Matrix
+│   │   ├── cfm.hpp            # CFM: Correct Flow Matrix
+│   │   ├── afm.hpp            # AFM: Adversarial Flow Matrix
 │   │   └── softmax.hpp        # Softmax + parameter sampling
 │   ├── ea/
 │   │   ├── chromosome.hpp     # Genetic encoding
@@ -477,11 +477,11 @@ dstt-full/
 │   │   ├── fitness.hpp        # Fitness evaluation
 │   │   └── population.hpp     # Population manager + generational loop
 │   ├── fdmp/
-│   │   ├── fdmp.hpp           # Fundamental Data Matrix Processor
-│   │   ├── tokenizer.hpp      # BPE tokenizer + learned embeddings
+│   │   ├── fdmp.hpp           # FDMP: Fundamental Data Matrix Processor
+│   │   ├── tokenizer.hpp      # BPE: Byte-Pair Encoding tokenizer + learned embeddings
 │   │   └── embeddings.hpp     # Modality-specific embedding helpers
 │   ├── mge/
-│   │   ├── mge.hpp            # Multimedia Generation Engine
+│   │   ├── mge.hpp            # MGE: Multimedia Generation Engine
 │   │   ├── branch_predictor.hpp
 │   │   └── synthesiser.hpp    # Output synthesis
 │   ├── model/
